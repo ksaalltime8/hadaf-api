@@ -2,6 +2,7 @@
   "name": "hadaf-api",
   "version": "1.0.0",
   "scripts": {
+    "build": "echo Build OK",
     "start": "node app.js"
   },
   "dependencies": {
