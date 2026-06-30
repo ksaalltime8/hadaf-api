@@ -1,3 +1,4 @@
+require("dotenv").config();
 const express = require("express");
 const mongoose = require("mongoose");
 const cors = require("cors");
@@ -30,10 +31,15 @@ app.use(session({
 
 /* ========================= MONGODB ========================= */
 const MONGO_URI = process.env.MONGODB_URI || process.env.MONGO_URL;
+console.log("🔍 MONGODB_URI set:", MONGO_URI ? "YES ✅" : "NO ❌");
 if (!MONGO_URI) {
   console.error("❌ MONGODB_URI is not set! Add it to environment variables.");
 } else {
-  mongoose.connect(MONGO_URI)
+  mongoose.connect(MONGO_URI, {
+    serverSelectionTimeoutMS: 15000,
+    socketTimeoutMS: 45000,
+    family: 4,
+  })
     .then(() => { console.log("✅ MongoDB Connected"); seedAdmin(); })
     .catch(err => console.error("❌ MongoDB Error:", err.message));
 }
@@ -44,7 +50,9 @@ const AdminSchema = new mongoose.Schema({
   username: { type: String, unique: true },
   passwordHash: String,
   isSuperAdmin: { type: Boolean, default: false },
-  permissions: { type: [String], default: [] }
+  permissions: { type: [String], default: [] },
+  role: { type: String, default: "" },
+  pushTokens: { type: [String], default: [] }
 });
 const Admin = mongoose.model("Admin", AdminSchema);
 
@@ -143,8 +151,33 @@ function requireSuperAdmin(req, res, next) {
 app.get("/api/health", (req, res) => {
   const dbState = mongoose.connection.readyState;
   const states = { 0: "disconnected", 1: "connected", 2: "connecting", 3: "disconnecting" };
-  res.json({ ok: true, db: states[dbState] || "unknown", time: new Date().toISOString() });
+  res.json({
+    ok: true,
+    db: states[dbState] || "unknown",
+    mongoUriSet: !!MONGO_URI,
+    time: new Date().toISOString()
+  });
 });
+
+/* ========================= PUSH NOTIFICATIONS ========================= */
+async function sendPushToAllAdmins(title, body) {
+  try {
+    const admins = await Admin.find({ pushTokens: { $exists: true, $not: { $size: 0 } } });
+    const tokens = admins.flatMap(a => a.pushTokens || [])
+      .filter(t => t.startsWith("ExponentPushToken[") || t.startsWith("ExpoPushToken["));
+    if (!tokens.length) return;
+    const chunks = [];
+    for (let i = 0; i < tokens.length; i += 100) chunks.push(tokens.slice(i, i + 100));
+    for (const chunk of chunks) {
+      const messages = chunk.map(to => ({ to, title, body, sound: "default" }));
+      await fetch("https://exp.host/--/api/v2/push/send", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Accept": "application/json" },
+        body: JSON.stringify(messages)
+      });
+    }
+  } catch (err) { console.error("Push error:", err.message); }
+}
 
 /* ========================= AUTH ========================= */
 app.post("/api/auth/login", async (req, res) => {
@@ -160,9 +193,11 @@ app.post("/api/auth/login", async (req, res) => {
     req.session.username = admin.username;
     req.session.isSuperAdmin = admin.isSuperAdmin;
     req.session.permissions = admin.permissions;
+    req.session.role = admin.role || "";
     req.session.save(() => res.json({
       ok: true, username: admin.username,
-      isSuperAdmin: admin.isSuperAdmin, permissions: admin.permissions
+      isSuperAdmin: admin.isSuperAdmin, permissions: admin.permissions,
+      role: admin.role || ""
     }));
   } catch (err) {
     console.error("Login error:", err.message);
@@ -174,6 +209,19 @@ app.post("/api/auth/logout", (req, res) => {
   req.session.destroy(() => res.json({ ok: true }));
 });
 
+app.post("/api/auth/push-token", requireAuth, async (req, res) => {
+  try {
+    const { token, remove } = req.body;
+    if (!token) return res.status(400).json({ ok: false, error: "token required" });
+    if (remove) {
+      await Admin.findOneAndUpdate({ username: req.session.username }, { $pull: { pushTokens: token } });
+    } else {
+      await Admin.findOneAndUpdate({ username: req.session.username }, { $addToSet: { pushTokens: token } });
+    }
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ ok: false }); }
+});
+
 app.get("/api/auth/me", (req, res) => {
   if (!req.session || !req.session.username)
     return res.status(401).json({ authenticated: false });
@@ -181,7 +229,8 @@ app.get("/api/auth/me", (req, res) => {
     authenticated: true,
     username: req.session.username,
     isSuperAdmin: req.session.isSuperAdmin || false,
-    permissions: req.session.permissions || []
+    permissions: req.session.permissions || [],
+    role: req.session.role || ""
   });
 });
 
@@ -338,8 +387,14 @@ app.get("/api/registrations", requireAuth, async (req, res) => {
   catch (err) { res.status(500).json({ error: err.message }); }
 });
 app.post("/api/registrations", async (req, res) => {
-  try { res.json(await Registration.create({ ...req.body, id: Date.now().toString() })); }
-  catch (err) { res.status(500).json({ error: err.message }); }
+  try {
+    const reg = await Registration.create({ ...req.body, id: Date.now().toString() });
+    res.json(reg);
+    sendPushToAllAdmins(
+      "طلب تسجيل جديد 📋",
+      `${req.body.playerName} — ولي الأمر: ${req.body.guardianName}`
+    );
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 app.patch("/api/registrations/:id/status", requireAuth, async (req, res) => {
   try {
@@ -367,10 +422,10 @@ app.get("/api/admin-accounts", requireAuth, requireSuperAdmin, async (req, res) 
 });
 app.post("/api/admin-accounts", requireAuth, requireSuperAdmin, async (req, res) => {
   try {
-    const { username, password, isSuperAdmin, permissions } = req.body;
+    const { username, password, isSuperAdmin, permissions, role } = req.body;
     if (await Admin.findOne({ username })) return res.status(400).json({ error: "المستخدم موجود" });
     const passwordHash = await hashPassword(password);
-    const admin = await Admin.create({ id: Date.now().toString(), username, passwordHash, isSuperAdmin: isSuperAdmin || false, permissions: permissions || [] });
+    const admin = await Admin.create({ id: Date.now().toString(), username, passwordHash, isSuperAdmin: isSuperAdmin || false, permissions: permissions || [], role: role || "" });
     const obj = admin.toObject(); delete obj.passwordHash; res.json(obj);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
