@@ -4,6 +4,7 @@ const cors = require("cors");
 const session = require("express-session");
 const path = require("path");
 const crypto = require("crypto");
+const fs = require("fs");
 const { promisify } = require("util");
 
 const scryptAsync = promisify(crypto.scrypt);
@@ -29,12 +30,13 @@ app.use(session({
 
 /* ========================= MONGODB ========================= */
 const MONGO_URI = process.env.MONGODB_URI || process.env.MONGO_URL;
-mongoose.connect(MONGO_URI)
-  .then(() => {
-    console.log("✅ MongoDB Connected");
-    seedAdmin();
-  })
-  .catch(err => console.log("❌ MongoDB Error:", err.message));
+if (!MONGO_URI) {
+  console.error("❌ MONGODB_URI is not set! Add it to environment variables.");
+} else {
+  mongoose.connect(MONGO_URI)
+    .then(() => { console.log("✅ MongoDB Connected"); seedAdmin(); })
+    .catch(err => console.error("❌ MongoDB Error:", err.message));
+}
 
 /* ========================= MODELS ========================= */
 const AdminSchema = new mongoose.Schema({
@@ -47,139 +49,125 @@ const AdminSchema = new mongoose.Schema({
 const Admin = mongoose.model("Admin", AdminSchema);
 
 const PlayerSchema = new mongoose.Schema({
-  id: String,
-  name: String,
-  phone: String,
-  age: Number,
-  position: String,
-  category: String,
-  imageUrl: String,
-  notes: String
+  id: String, name: String, phone: String, age: Number,
+  position: String, category: String, imageUrl: String, notes: String
 }, { timestamps: true });
 const Player = mongoose.model("Player", PlayerSchema);
 
 const EmployeeSchema = new mongoose.Schema({
-  id: String,
-  name: String,
-  phone: String,
-  role: String,
-  salary: Number,
-  joinDate: String,
-  imageUrl: String,
-  notes: String
+  id: String, name: String, phone: String, role: String,
+  salary: Number, joinDate: String, imageUrl: String, notes: String
 }, { timestamps: true });
 const Employee = mongoose.model("Employee", EmployeeSchema);
 
 const SubscriptionSchema = new mongoose.Schema({
-  id: String,
-  playerId: String,
-  playerName: String,
-  startDate: String,
-  endDate: String,
-  amount: Number,
+  id: String, playerId: String, playerName: String,
+  startDate: String, endDate: String, amount: Number,
   paid: { type: Boolean, default: false }
 }, { timestamps: true });
 const Subscription = mongoose.model("Subscription", SubscriptionSchema);
 
 const ExpenseSchema = new mongoose.Schema({
-  id: String,
-  description: String,
-  amount: Number,
-  category: String,
-  date: String,
-  notes: String
+  id: String, description: String, amount: Number,
+  category: String, date: String, notes: String
 }, { timestamps: true });
 const Expense = mongoose.model("Expense", ExpenseSchema);
 
 const SalarySchema = new mongoose.Schema({
-  id: String,
-  employeeId: String,
-  employeeName: String,
-  month: Number,
-  year: Number,
-  amount: Number,
-  paid: { type: Boolean, default: false },
-  paidDate: String
+  id: String, employeeId: String, employeeName: String,
+  month: Number, year: Number, amount: Number,
+  paid: { type: Boolean, default: false }, paidDate: String
 }, { timestamps: true });
 const Salary = mongoose.model("Salary", SalarySchema);
 
 const RegistrationSchema = new mongoose.Schema({
-  id: String,
-  name: String,
-  phone: String,
-  age: Number,
-  position: String,
-  parentName: String,
-  parentPhone: String,
+  id: String, name: String, phone: String, age: Number,
+  position: String, parentName: String, parentPhone: String,
   status: { type: String, default: "pending" },
-  notes: String,
-  submittedAt: { type: Date, default: Date.now }
+  notes: String, submittedAt: { type: Date, default: Date.now }
 }, { timestamps: true });
 const Registration = mongoose.model("Registration", RegistrationSchema);
 
 const SettingsSchema = new mongoose.Schema({
   academyName: { type: String, default: "أكاديمية هدف يونايتد" },
-  phone: String,
-  email: String,
-  address: String,
-  logo: String,
+  phone: String, email: String, address: String, logo: String,
   currency: { type: String, default: "SAR" },
   subscriptionDefaultDays: { type: Number, default: 30 }
 });
 const Settings = mongoose.model("Settings", SettingsSchema);
 
-/* ========================= PASSWORD UTILS ========================= */
+/* ========================= PASSWORD ========================= */
 async function hashPassword(password) {
   const salt = crypto.randomBytes(16).toString("hex");
   const buf = await scryptAsync(password, salt, 64);
   return `${buf.toString("hex")}.${salt}`;
 }
-
 async function verifyPassword(password, stored) {
-  const [hash, salt] = stored.split(".");
-  const buf = await scryptAsync(password, salt, 64);
-  return crypto.timingSafeEqual(Buffer.from(hash, "hex"), buf);
+  try {
+    const [hash, salt] = stored.split(".");
+    if (!hash || !salt) return false;
+    const buf = await scryptAsync(password, salt, 64);
+    return crypto.timingSafeEqual(Buffer.from(hash, "hex"), buf);
+  } catch { return false; }
 }
 
 /* ========================= SEED ADMIN ========================= */
 async function seedAdmin() {
-  const username = process.env.ADMIN_USERNAME || "k27";
-  const password = process.env.ADMIN_PASSWORD || "q1w2e3r4t5";
-  const existing = await Admin.findOne({ username });
-  if (!existing) {
-    const passwordHash = await hashPassword(password);
-    await Admin.create({ id: "1", username, passwordHash, isSuperAdmin: true });
-    console.log("✅ Admin created:", username);
-  } else if (!existing.isSuperAdmin) {
-    await Admin.findOneAndUpdate({ username }, { $set: { isSuperAdmin: true } });
-  }
+  try {
+    const username = process.env.ADMIN_USERNAME || "k27";
+    const password = process.env.ADMIN_PASSWORD || "q1w2e3r4t5";
+    const existing = await Admin.findOne({ username });
+    if (!existing) {
+      const passwordHash = await hashPassword(password);
+      await Admin.create({ id: "1", username, passwordHash, isSuperAdmin: true });
+      console.log("✅ Admin created:", username);
+    } else if (!existing.isSuperAdmin) {
+      await Admin.findOneAndUpdate({ username }, { $set: { isSuperAdmin: true } });
+    }
+  } catch (err) { console.error("Seed admin error:", err.message); }
 }
 
-/* ========================= AUTH MIDDLEWARE ========================= */
+/* ========================= MIDDLEWARE AUTH ========================= */
 function requireAuth(req, res, next) {
-  if (!req.session.username) return res.status(401).json({ ok: false, error: "غير مصرح" });
+  if (!req.session || !req.session.username)
+    return res.status(401).json({ ok: false, error: "غير مصرح" });
   next();
 }
 function requireSuperAdmin(req, res, next) {
-  if (!req.session.isSuperAdmin) return res.status(403).json({ ok: false, error: "ممنوع" });
+  if (!req.session || !req.session.isSuperAdmin)
+    return res.status(403).json({ ok: false, error: "ممنوع" });
   next();
 }
 
 /* ========================= HEALTH ========================= */
-app.get("/api/health", (req, res) => res.json({ ok: true, time: new Date().toISOString() }));
+app.get("/api/health", (req, res) => {
+  const dbState = mongoose.connection.readyState;
+  const states = { 0: "disconnected", 1: "connected", 2: "connecting", 3: "disconnecting" };
+  res.json({ ok: true, db: states[dbState] || "unknown", time: new Date().toISOString() });
+});
 
-/* ========================= AUTH ROUTES ========================= */
+/* ========================= AUTH ========================= */
 app.post("/api/auth/login", async (req, res) => {
-  const { username, password } = req.body;
-  if (!username || !password) return res.status(400).json({ ok: false, error: "بيانات ناقصة" });
-  const admin = await Admin.findOne({ username });
-  if (!admin) return res.status(401).json({ ok: false, error: "بيانات خاطئة" });
-  const valid = await verifyPassword(password, admin.passwordHash);
-  if (!valid) return res.status(401).json({ ok: false, error: "بيانات خاطئة" });
-  req.session.username = admin.username;
-  req.session.isSuperAdmin = admin.isSuperAdmin;
-  req.session.permissions = admin.permissions;
-  req.session.save(() => res.json({ ok: true, username: admin.username, isSuperAdmin: admin.isSuperAdmin, permissions: admin.permissions }));
+  try {
+    const { username, password } = req.body;
+    if (!username || !password) return res.status(400).json({ ok: false, error: "بيانات ناقصة" });
+    if (mongoose.connection.readyState !== 1)
+      return res.status(503).json({ ok: false, error: "قاعدة البيانات غير متصلة" });
+    const admin = await Admin.findOne({ username });
+    if (!admin) return res.status(401).json({ ok: false, error: "بيانات خاطئة" });
+    const valid = await verifyPassword(password, admin.passwordHash);
+    if (!valid) return res.status(401).json({ ok: false, error: "بيانات خاطئة" });
+    req.session.username = admin.username;
+    req.session.isSuperAdmin = admin.isSuperAdmin;
+    req.session.permissions = admin.permissions;
+    req.session.save(() => res.json({
+      ok: true, username: admin.username,
+      isSuperAdmin: admin.isSuperAdmin, permissions: admin.permissions
+    }));
+  } catch (err) {
+    console.error("Login error:", err.message);
+    res.status(500).json({ ok: false, error: "خطأ في الخادم" });
+  }
 });
 
 app.post("/api/auth/logout", (req, res) => {
@@ -187,221 +175,239 @@ app.post("/api/auth/logout", (req, res) => {
 });
 
 app.get("/api/auth/me", (req, res) => {
-  if (!req.session.username) return res.status(401).json({ authenticated: false });
-  res.json({ authenticated: true, username: req.session.username, isSuperAdmin: req.session.isSuperAdmin || false, permissions: req.session.permissions || [] });
+  if (!req.session || !req.session.username)
+    return res.status(401).json({ authenticated: false });
+  res.json({
+    authenticated: true,
+    username: req.session.username,
+    isSuperAdmin: req.session.isSuperAdmin || false,
+    permissions: req.session.permissions || []
+  });
 });
 
 /* ========================= PLAYERS ========================= */
 app.get("/api/players", requireAuth, async (req, res) => {
-  const players = await Player.find({}).sort({ createdAt: -1 });
-  res.json(players);
+  try { res.json(await Player.find({}).sort({ createdAt: -1 })); }
+  catch (err) { res.status(500).json({ error: err.message }); }
 });
 app.post("/api/players", requireAuth, async (req, res) => {
-  const player = await Player.create({ ...req.body, id: Date.now().toString() });
-  res.json(player);
+  try { res.json(await Player.create({ ...req.body, id: Date.now().toString() })); }
+  catch (err) { res.status(500).json({ error: err.message }); }
 });
 app.put("/api/players/:id", requireAuth, async (req, res) => {
-  const player = await Player.findOneAndUpdate({ id: req.params.id }, req.body, { new: true });
-  if (!player) return res.status(404).json({ error: "غير موجود" });
-  res.json(player);
+  try {
+    const p = await Player.findOneAndUpdate({ id: req.params.id }, req.body, { new: true });
+    if (!p) return res.status(404).json({ error: "غير موجود" });
+    res.json(p);
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 app.delete("/api/players/:id", requireAuth, async (req, res) => {
-  await Player.findOneAndDelete({ id: req.params.id });
-  res.json({ ok: true });
+  try { await Player.findOneAndDelete({ id: req.params.id }); res.json({ ok: true }); }
+  catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 /* ========================= EMPLOYEES ========================= */
 app.get("/api/employees", requireAuth, async (req, res) => {
-  const employees = await Employee.find({}).sort({ createdAt: -1 });
-  res.json(employees);
+  try { res.json(await Employee.find({}).sort({ createdAt: -1 })); }
+  catch (err) { res.status(500).json({ error: err.message }); }
 });
 app.post("/api/employees", requireAuth, async (req, res) => {
-  const employee = await Employee.create({ ...req.body, id: Date.now().toString() });
-  res.json(employee);
+  try { res.json(await Employee.create({ ...req.body, id: Date.now().toString() })); }
+  catch (err) { res.status(500).json({ error: err.message }); }
 });
 app.put("/api/employees/:id", requireAuth, async (req, res) => {
-  const employee = await Employee.findOneAndUpdate({ id: req.params.id }, req.body, { new: true });
-  if (!employee) return res.status(404).json({ error: "غير موجود" });
-  res.json(employee);
+  try {
+    const e = await Employee.findOneAndUpdate({ id: req.params.id }, req.body, { new: true });
+    if (!e) return res.status(404).json({ error: "غير موجود" });
+    res.json(e);
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 app.delete("/api/employees/:id", requireAuth, async (req, res) => {
-  await Employee.findOneAndDelete({ id: req.params.id });
-  res.json({ ok: true });
+  try { await Employee.findOneAndDelete({ id: req.params.id }); res.json({ ok: true }); }
+  catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 /* ========================= SUBSCRIPTIONS ========================= */
 app.get("/api/subscriptions/expiring-soon", requireAuth, async (req, res) => {
-  const today = new Date();
-  const in7days = new Date(today);
-  in7days.setDate(today.getDate() + 7);
-  const todayStr = today.toISOString().split("T")[0];
-  const futureStr = in7days.toISOString().split("T")[0];
-  const subs = await Subscription.find({ endDate: { $gte: todayStr, $lte: futureStr } });
-  res.json(subs);
+  try {
+    const today = new Date().toISOString().split("T")[0];
+    const future = new Date(Date.now() + 7 * 86400000).toISOString().split("T")[0];
+    res.json(await Subscription.find({ endDate: { $gte: today, $lte: future } }));
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 app.get("/api/subscriptions", requireAuth, async (req, res) => {
-  const subs = await Subscription.find({}).sort({ createdAt: -1 });
-  res.json(subs);
+  try { res.json(await Subscription.find({}).sort({ createdAt: -1 })); }
+  catch (err) { res.status(500).json({ error: err.message }); }
 });
 app.post("/api/subscriptions", requireAuth, async (req, res) => {
-  const sub = await Subscription.create({ ...req.body, id: Date.now().toString() });
-  res.json(sub);
+  try { res.json(await Subscription.create({ ...req.body, id: Date.now().toString() })); }
+  catch (err) { res.status(500).json({ error: err.message }); }
 });
 app.put("/api/subscriptions/:id", requireAuth, async (req, res) => {
-  const sub = await Subscription.findOneAndUpdate({ id: req.params.id }, req.body, { new: true });
-  if (!sub) return res.status(404).json({ error: "غير موجود" });
-  res.json(sub);
+  try {
+    const s = await Subscription.findOneAndUpdate({ id: req.params.id }, req.body, { new: true });
+    if (!s) return res.status(404).json({ error: "غير موجود" });
+    res.json(s);
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 app.delete("/api/subscriptions/:id", requireAuth, async (req, res) => {
-  await Subscription.findOneAndDelete({ id: req.params.id });
-  res.json({ ok: true });
+  try { await Subscription.findOneAndDelete({ id: req.params.id }); res.json({ ok: true }); }
+  catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 /* ========================= EXPENSES ========================= */
 app.get("/api/expenses", requireAuth, async (req, res) => {
-  const expenses = await Expense.find({}).sort({ createdAt: -1 });
-  res.json(expenses);
+  try { res.json(await Expense.find({}).sort({ createdAt: -1 })); }
+  catch (err) { res.status(500).json({ error: err.message }); }
 });
 app.post("/api/expenses", requireAuth, async (req, res) => {
-  const expense = await Expense.create({ ...req.body, id: Date.now().toString() });
-  res.json(expense);
+  try { res.json(await Expense.create({ ...req.body, id: Date.now().toString() })); }
+  catch (err) { res.status(500).json({ error: err.message }); }
 });
 app.put("/api/expenses/:id", requireAuth, async (req, res) => {
-  const expense = await Expense.findOneAndUpdate({ id: req.params.id }, req.body, { new: true });
-  if (!expense) return res.status(404).json({ error: "غير موجود" });
-  res.json(expense);
+  try {
+    const e = await Expense.findOneAndUpdate({ id: req.params.id }, req.body, { new: true });
+    if (!e) return res.status(404).json({ error: "غير موجود" });
+    res.json(e);
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 app.delete("/api/expenses/:id", requireAuth, async (req, res) => {
-  await Expense.findOneAndDelete({ id: req.params.id });
-  res.json({ ok: true });
+  try { await Expense.findOneAndDelete({ id: req.params.id }); res.json({ ok: true }); }
+  catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 /* ========================= SALARIES ========================= */
 app.get("/api/salaries", requireAuth, async (req, res) => {
-  const salaries = await Salary.find({}).sort({ year: -1, month: -1 });
-  res.json(salaries);
+  try { res.json(await Salary.find({}).sort({ year: -1, month: -1 })); }
+  catch (err) { res.status(500).json({ error: err.message }); }
 });
 app.post("/api/salaries", requireAuth, async (req, res) => {
-  const salary = await Salary.create({ ...req.body, id: Date.now().toString() });
-  res.json(salary);
+  try { res.json(await Salary.create({ ...req.body, id: Date.now().toString() })); }
+  catch (err) { res.status(500).json({ error: err.message }); }
 });
 app.put("/api/salaries/:id", requireAuth, async (req, res) => {
-  const salary = await Salary.findOneAndUpdate({ id: req.params.id }, req.body, { new: true });
-  if (!salary) return res.status(404).json({ error: "غير موجود" });
-  res.json(salary);
+  try {
+    const s = await Salary.findOneAndUpdate({ id: req.params.id }, req.body, { new: true });
+    if (!s) return res.status(404).json({ error: "غير موجود" });
+    res.json(s);
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 app.delete("/api/salaries/:id", requireAuth, async (req, res) => {
-  await Salary.findOneAndDelete({ id: req.params.id });
-  res.json({ ok: true });
+  try { await Salary.findOneAndDelete({ id: req.params.id }); res.json({ ok: true }); }
+  catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 /* ========================= DASHBOARD ========================= */
 app.get("/api/dashboard/summary", requireAuth, async (req, res) => {
-  const [players, employees, subs, regs] = await Promise.all([
-    Player.countDocuments(),
-    Employee.countDocuments(),
-    Subscription.countDocuments(),
-    Registration.countDocuments({ status: "pending" })
-  ]);
-  const today = new Date();
-  const in7days = new Date(today);
-  in7days.setDate(today.getDate() + 7);
-  const todayStr = today.toISOString().split("T")[0];
-  const futureStr = in7days.toISOString().split("T")[0];
-  const expiring = await Subscription.countDocuments({ endDate: { $gte: todayStr, $lte: futureStr } });
-  res.json({ players, employees, subscriptions: subs, pendingRegistrations: regs, expiringSubscriptions: expiring });
+  try {
+    const today = new Date().toISOString().split("T")[0];
+    const future = new Date(Date.now() + 7 * 86400000).toISOString().split("T")[0];
+    const [players, employees, subscriptions, pendingRegistrations, expiringSubscriptions] = await Promise.all([
+      Player.countDocuments(),
+      Employee.countDocuments(),
+      Subscription.countDocuments(),
+      Registration.countDocuments({ status: "pending" }),
+      Subscription.countDocuments({ endDate: { $gte: today, $lte: future } })
+    ]);
+    res.json({ players, employees, subscriptions, pendingRegistrations, expiringSubscriptions });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.get("/api/dashboard/finance-summary", requireAuth, async (req, res) => {
-  const now = new Date();
-  const month = now.getMonth() + 1;
-  const year = now.getFullYear();
-  const startOfMonth = new Date(year, month - 1, 1).toISOString().split("T")[0];
-  const endOfMonth = new Date(year, month, 0).toISOString().split("T")[0];
-  const [expenses, salaries, subs] = await Promise.all([
-    Expense.find({ date: { $gte: startOfMonth, $lte: endOfMonth } }),
-    Salary.find({ month, year, paid: true }),
-    Subscription.find({ paid: true, startDate: { $gte: startOfMonth } })
-  ]);
-  const totalExpenses = expenses.reduce((s, e) => s + (e.amount || 0), 0);
-  const totalSalaries = salaries.reduce((s, e) => s + (e.amount || 0), 0);
-  const totalIncome = subs.reduce((s, e) => s + (e.amount || 0), 0);
-  res.json({ totalIncome, totalExpenses: totalExpenses + totalSalaries, netProfit: totalIncome - totalExpenses - totalSalaries, month, year });
+  try {
+    const now = new Date();
+    const month = now.getMonth() + 1;
+    const year = now.getFullYear();
+    const start = new Date(year, month - 1, 1).toISOString().split("T")[0];
+    const end = new Date(year, month, 0).toISOString().split("T")[0];
+    const [expenses, salaries, subs] = await Promise.all([
+      Expense.find({ date: { $gte: start, $lte: end } }),
+      Salary.find({ month, year, paid: true }),
+      Subscription.find({ paid: true, startDate: { $gte: start } })
+    ]);
+    const totalExpenses = expenses.reduce((s, e) => s + (e.amount || 0), 0);
+    const totalSalaries = salaries.reduce((s, e) => s + (e.amount || 0), 0);
+    const totalIncome = subs.reduce((s, e) => s + (e.amount || 0), 0);
+    res.json({ totalIncome, totalExpenses: totalExpenses + totalSalaries, netProfit: totalIncome - totalExpenses - totalSalaries, month, year });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 /* ========================= REGISTRATIONS ========================= */
 app.get("/api/registrations", requireAuth, async (req, res) => {
-  const regs = await Registration.find({}).sort({ submittedAt: -1 });
-  res.json(regs);
+  try { res.json(await Registration.find({}).sort({ submittedAt: -1 })); }
+  catch (err) { res.status(500).json({ error: err.message }); }
 });
 app.post("/api/registrations", async (req, res) => {
-  const reg = await Registration.create({ ...req.body, id: Date.now().toString() });
-  res.json(reg);
-});
-app.get("/api/registrations/:id", requireAuth, async (req, res) => {
-  const reg = await Registration.findOne({ id: req.params.id });
-  if (!reg) return res.status(404).json({ error: "غير موجود" });
-  res.json(reg);
+  try { res.json(await Registration.create({ ...req.body, id: Date.now().toString() })); }
+  catch (err) { res.status(500).json({ error: err.message }); }
 });
 app.patch("/api/registrations/:id/status", requireAuth, async (req, res) => {
-  const { status } = req.body;
-  const reg = await Registration.findOneAndUpdate({ id: req.params.id }, { status }, { new: true });
-  if (!reg) return res.status(404).json({ error: "غير موجود" });
-  res.json(reg);
+  try {
+    const r = await Registration.findOneAndUpdate({ id: req.params.id }, { status: req.body.status }, { new: true });
+    if (!r) return res.status(404).json({ error: "غير موجود" });
+    res.json(r);
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 app.put("/api/registrations/:id", requireAuth, async (req, res) => {
-  const reg = await Registration.findOneAndUpdate({ id: req.params.id }, req.body, { new: true });
-  if (!reg) return res.status(404).json({ error: "غير موجود" });
-  res.json(reg);
+  try {
+    const r = await Registration.findOneAndUpdate({ id: req.params.id }, req.body, { new: true });
+    if (!r) return res.status(404).json({ error: "غير موجود" });
+    res.json(r);
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 app.delete("/api/registrations/:id", requireAuth, async (req, res) => {
-  await Registration.findOneAndDelete({ id: req.params.id });
-  res.json({ ok: true });
+  try { await Registration.findOneAndDelete({ id: req.params.id }); res.json({ ok: true }); }
+  catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 /* ========================= ADMIN ACCOUNTS ========================= */
 app.get("/api/admin-accounts", requireAuth, requireSuperAdmin, async (req, res) => {
-  const admins = await Admin.find({}, { passwordHash: 0 });
-  res.json(admins);
+  try { res.json(await Admin.find({}, { passwordHash: 0 })); }
+  catch (err) { res.status(500).json({ error: err.message }); }
 });
 app.post("/api/admin-accounts", requireAuth, requireSuperAdmin, async (req, res) => {
-  const { username, password, isSuperAdmin, permissions } = req.body;
-  const exists = await Admin.findOne({ username });
-  if (exists) return res.status(400).json({ error: "المستخدم موجود مسبقاً" });
-  const passwordHash = await hashPassword(password);
-  const admin = await Admin.create({ id: Date.now().toString(), username, passwordHash, isSuperAdmin: isSuperAdmin || false, permissions: permissions || [] });
-  res.json({ ...admin.toObject(), passwordHash: undefined });
+  try {
+    const { username, password, isSuperAdmin, permissions } = req.body;
+    if (await Admin.findOne({ username })) return res.status(400).json({ error: "المستخدم موجود" });
+    const passwordHash = await hashPassword(password);
+    const admin = await Admin.create({ id: Date.now().toString(), username, passwordHash, isSuperAdmin: isSuperAdmin || false, permissions: permissions || [] });
+    const obj = admin.toObject(); delete obj.passwordHash; res.json(obj);
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 app.put("/api/admin-accounts/:id", requireAuth, requireSuperAdmin, async (req, res) => {
-  const { password, ...rest } = req.body;
-  const update = { ...rest };
-  if (password) update.passwordHash = await hashPassword(password);
-  const admin = await Admin.findOneAndUpdate({ id: req.params.id }, update, { new: true, projection: { passwordHash: 0 } });
-  if (!admin) return res.status(404).json({ error: "غير موجود" });
-  res.json(admin);
+  try {
+    const { password, ...rest } = req.body;
+    if (password) rest.passwordHash = await hashPassword(password);
+    const admin = await Admin.findOneAndUpdate({ id: req.params.id }, rest, { new: true, projection: { passwordHash: 0 } });
+    if (!admin) return res.status(404).json({ error: "غير موجود" });
+    res.json(admin);
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 app.delete("/api/admin-accounts/:id", requireAuth, requireSuperAdmin, async (req, res) => {
-  await Admin.findOneAndDelete({ id: req.params.id });
-  res.json({ ok: true });
+  try { await Admin.findOneAndDelete({ id: req.params.id }); res.json({ ok: true }); }
+  catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 /* ========================= SETTINGS ========================= */
 app.get("/api/settings", requireAuth, async (req, res) => {
-  let settings = await Settings.findOne();
-  if (!settings) settings = await Settings.create({});
-  res.json(settings);
+  try {
+    let s = await Settings.findOne();
+    if (!s) s = await Settings.create({});
+    res.json(s);
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 app.put("/api/settings", requireAuth, requireSuperAdmin, async (req, res) => {
-  let settings = await Settings.findOne();
-  if (!settings) settings = new Settings({});
-  Object.assign(settings, req.body);
-  await settings.save();
-  res.json(settings);
+  try {
+    let s = await Settings.findOne();
+    if (!s) s = new Settings({});
+    Object.assign(s, req.body);
+    await s.save();
+    res.json(s);
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-/* ========================= SERVE REACT APP ========================= */
+/* ========================= SERVE REACT ========================= */
 const publicDir = path.join(__dirname, "public");
-const fs = require("fs");
 if (fs.existsSync(publicDir)) {
   app.use(express.static(publicDir));
   app.get("*", (req, res) => {
@@ -413,4 +419,5 @@ if (fs.existsSync(publicDir)) {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, "0.0.0.0", () => {
   console.log("🚀 Server running on port", PORT);
+  console.log("📦 MONGODB_URI:", MONGO_URI ? "SET ✅" : "NOT SET ❌");
 });
