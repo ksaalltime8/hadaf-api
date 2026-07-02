@@ -1,14 +1,16 @@
+require("dotenv").config();
 const express = require("express");
 const mongoose = require("mongoose");
 const cors = require("cors");
 const session = require("express-session");
+const MongoStore = require("connect-mongo");
 const path = require("path");
 const crypto = require("crypto");
 const fs = require("fs");
+const https = require("https");
 const { promisify } = require("util");
 
 const scryptAsync = promisify(crypto.scrypt);
-
 const app = express();
 
 /* ========================= MIDDLEWARE ========================= */
@@ -16,27 +18,40 @@ app.set("trust proxy", 1);
 app.use(cors({ origin: true, credentials: true }));
 app.use(express.json({ limit: "5mb" }));
 app.use(express.urlencoded({ extended: true, limit: "5mb" }));
+
+/* ========================= MONGODB ========================= */
+const MONGO_URI = process.env.MONGODB_URI || process.env.MONGO_URL;
+console.log("MongoDB URI set:", MONGO_URI ? "YES" : "NO");
+if (!MONGO_URI) {
+  console.error("MONGODB_URI is not set!");
+  process.exit(1);
+}
+
+mongoose.connect(MONGO_URI, {
+  serverSelectionTimeoutMS: 15000,
+  socketTimeoutMS: 45000,
+  family: 4,
+})
+  .then(() => { console.log("MongoDB Connected"); seedAdmin(); })
+  .catch(err => { console.error("MongoDB Error:", err.message); process.exit(1); });
+
+/* ========================= SESSION (MongoDB store) ========================= */
 app.use(session({
   secret: process.env.SESSION_SECRET || "hadaf-secret-2024",
   resave: false,
   saveUninitialized: false,
+  store: MongoStore.create({
+    mongoUrl: MONGO_URI,
+    ttl: 7 * 24 * 60 * 60,
+    autoRemove: "native"
+  }),
   cookie: {
-    secure: process.env.NODE_ENV === "production",
+    secure: true,
     httpOnly: true,
-    sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
+    sameSite: "none",
     maxAge: 7 * 24 * 60 * 60 * 1000
   }
 }));
-
-/* ========================= MONGODB ========================= */
-const MONGO_URI = process.env.MONGODB_URI || process.env.MONGO_URL;
-if (!MONGO_URI) {
-  console.error("❌ MONGODB_URI is not set! Add it to environment variables.");
-} else {
-  mongoose.connect(MONGO_URI)
-    .then(() => { console.log("✅ MongoDB Connected"); seedAdmin(); })
-    .catch(err => console.error("❌ MongoDB Error:", err.message));
-}
 
 /* ========================= MODELS ========================= */
 const AdminSchema = new mongoose.Schema({
@@ -44,7 +59,9 @@ const AdminSchema = new mongoose.Schema({
   username: { type: String, unique: true },
   passwordHash: String,
   isSuperAdmin: { type: Boolean, default: false },
-  permissions: { type: [String], default: [] }
+  permissions: { type: [String], default: [] },
+  role: { type: String, default: "" },
+  pushTokens: { type: [String], default: [] }
 });
 const Admin = mongoose.model("Admin", AdminSchema);
 
@@ -63,7 +80,8 @@ const Employee = mongoose.model("Employee", EmployeeSchema);
 const SubscriptionSchema = new mongoose.Schema({
   id: String, playerId: String, playerName: String,
   startDate: String, endDate: String, amount: Number,
-  paid: { type: Boolean, default: false }
+  paid: { type: Boolean, default: false },
+  guardianName: String, guardianPhone: String, notes: String
 }, { timestamps: true });
 const Subscription = mongoose.model("Subscription", SubscriptionSchema);
 
@@ -76,15 +94,17 @@ const Expense = mongoose.model("Expense", ExpenseSchema);
 const SalarySchema = new mongoose.Schema({
   id: String, employeeId: String, employeeName: String,
   month: Number, year: Number, amount: Number,
-  paid: { type: Boolean, default: false }, paidDate: String
+  paid: { type: Boolean, default: false }, paidAt: Date, notes: String
 }, { timestamps: true });
 const Salary = mongoose.model("Salary", SalarySchema);
 
 const RegistrationSchema = new mongoose.Schema({
-  id: String, name: String, phone: String, age: Number,
-  position: String, parentName: String, parentPhone: String,
+  id: String,
+  playerName: String, playerAge: Number, playerPosition: String,
+  playerPhoto: String, subscriptionDuration: String,
+  guardianName: String, guardianPhone: String,
   status: { type: String, default: "pending" },
-  notes: String, submittedAt: { type: Date, default: Date.now }
+  adminNote: String, notes: String
 }, { timestamps: true });
 const Registration = mongoose.model("Registration", RegistrationSchema);
 
@@ -120,14 +140,14 @@ async function seedAdmin() {
     if (!existing) {
       const passwordHash = await hashPassword(password);
       await Admin.create({ id: "1", username, passwordHash, isSuperAdmin: true });
-      console.log("✅ Admin created:", username);
+      console.log("Admin created:", username);
     } else if (!existing.isSuperAdmin) {
       await Admin.findOneAndUpdate({ username }, { $set: { isSuperAdmin: true } });
     }
   } catch (err) { console.error("Seed admin error:", err.message); }
 }
 
-/* ========================= MIDDLEWARE AUTH ========================= */
+/* ========================= AUTH MIDDLEWARE ========================= */
 function requireAuth(req, res, next) {
   if (!req.session || !req.session.username)
     return res.status(401).json({ ok: false, error: "غير مصرح" });
@@ -141,10 +161,38 @@ function requireSuperAdmin(req, res, next) {
 
 /* ========================= HEALTH ========================= */
 app.get("/api/health", (req, res) => {
-  const dbState = mongoose.connection.readyState;
   const states = { 0: "disconnected", 1: "connected", 2: "connecting", 3: "disconnecting" };
-  res.json({ ok: true, db: states[dbState] || "unknown", time: new Date().toISOString() });
+  res.json({ ok: true, db: states[mongoose.connection.readyState] || "unknown", time: new Date().toISOString() });
 });
+
+/* ========================= PUSH NOTIFICATIONS ========================= */
+function httpPost(url, data) {
+  return new Promise((resolve) => {
+    try {
+      const body = JSON.stringify(data);
+      const u = new URL(url);
+      const req = https.request({
+        hostname: u.hostname, path: u.pathname, method: "POST",
+        headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) }
+      }, res => { res.resume(); resolve(res.statusCode); });
+      req.on("error", () => resolve(0));
+      req.write(body);
+      req.end();
+    } catch (e) { resolve(0); }
+  });
+}
+async function sendPushToAllAdmins(title, body) {
+  try {
+    const admins = await Admin.find({ pushTokens: { $exists: true, $not: { $size: 0 } } });
+    const tokens = admins.flatMap(a => a.pushTokens || [])
+      .filter(t => t.startsWith("ExponentPushToken[") || t.startsWith("ExpoPushToken["));
+    if (!tokens.length) return;
+    for (let i = 0; i < tokens.length; i += 100) {
+      const messages = tokens.slice(i, i + 100).map(to => ({ to, title, body, sound: "default" }));
+      await httpPost("https://exp.host/--/api/v2/push/send", messages);
+    }
+  } catch (err) { console.error("Push error:", err.message); }
+}
 
 /* ========================= AUTH ========================= */
 app.post("/api/auth/login", async (req, res) => {
@@ -160,9 +208,12 @@ app.post("/api/auth/login", async (req, res) => {
     req.session.username = admin.username;
     req.session.isSuperAdmin = admin.isSuperAdmin;
     req.session.permissions = admin.permissions;
+    req.session.role = admin.role || "";
     req.session.save(() => res.json({
       ok: true, username: admin.username,
-      isSuperAdmin: admin.isSuperAdmin, permissions: admin.permissions
+      isSuperAdmin: admin.isSuperAdmin,
+      permissions: admin.permissions,
+      role: admin.role || ""
     }));
   } catch (err) {
     console.error("Login error:", err.message);
@@ -174,6 +225,19 @@ app.post("/api/auth/logout", (req, res) => {
   req.session.destroy(() => res.json({ ok: true }));
 });
 
+app.post("/api/auth/push-token", requireAuth, async (req, res) => {
+  try {
+    const { token, remove } = req.body;
+    if (!token) return res.status(400).json({ ok: false });
+    if (remove) {
+      await Admin.findOneAndUpdate({ username: req.session.username }, { $pull: { pushTokens: token } });
+    } else {
+      await Admin.findOneAndUpdate({ username: req.session.username }, { $addToSet: { pushTokens: token } });
+    }
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ ok: false }); }
+});
+
 app.get("/api/auth/me", (req, res) => {
   if (!req.session || !req.session.username)
     return res.status(401).json({ authenticated: false });
@@ -181,7 +245,8 @@ app.get("/api/auth/me", (req, res) => {
     authenticated: true,
     username: req.session.username,
     isSuperAdmin: req.session.isSuperAdmin || false,
-    permissions: req.session.permissions || []
+    permissions: req.session.permissions || [],
+    role: req.session.role || ""
   });
 });
 
@@ -282,7 +347,7 @@ app.get("/api/salaries", requireAuth, async (req, res) => {
   catch (err) { res.status(500).json({ error: err.message }); }
 });
 app.post("/api/salaries", requireAuth, async (req, res) => {
-  try { res.json(await Salary.create({ ...req.body, id: Date.now().toString() })); }
+  try { res.json(await Salary.create({ ...req.body, id: Date.now().toString(), paidAt: new Date() })); }
   catch (err) { res.status(500).json({ error: err.message }); }
 });
 app.put("/api/salaries/:id", requireAuth, async (req, res) => {
@@ -322,28 +387,48 @@ app.get("/api/dashboard/finance-summary", requireAuth, async (req, res) => {
     const end = new Date(year, month, 0).toISOString().split("T")[0];
     const [expenses, salaries, subs] = await Promise.all([
       Expense.find({ date: { $gte: start, $lte: end } }),
-      Salary.find({ month, year, paid: true }),
+      Salary.find({ month, year }),
       Subscription.find({ paid: true, startDate: { $gte: start } })
     ]);
     const totalExpenses = expenses.reduce((s, e) => s + (e.amount || 0), 0);
     const totalSalaries = salaries.reduce((s, e) => s + (e.amount || 0), 0);
     const totalIncome = subs.reduce((s, e) => s + (e.amount || 0), 0);
-    res.json({ totalIncome, totalExpenses: totalExpenses + totalSalaries, netProfit: totalIncome - totalExpenses - totalSalaries, month, year });
+    res.json({
+      totalIncome,
+      totalExpenses: totalExpenses + totalSalaries,
+      netProfit: totalIncome - totalExpenses - totalSalaries,
+      month, year
+    });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 /* ========================= REGISTRATIONS ========================= */
 app.get("/api/registrations", requireAuth, async (req, res) => {
-  try { res.json(await Registration.find({}).sort({ submittedAt: -1 })); }
+  try { res.json(await Registration.find({}).sort({ createdAt: -1 })); }
   catch (err) { res.status(500).json({ error: err.message }); }
 });
 app.post("/api/registrations", async (req, res) => {
-  try { res.json(await Registration.create({ ...req.body, id: Date.now().toString() })); }
-  catch (err) { res.status(500).json({ error: err.message }); }
+  try {
+    const reg = await Registration.create({ ...req.body, id: Date.now().toString() });
+    res.status(201).json(reg);
+    sendPushToAllAdmins(
+      "طلب تسجيل جديد 📋",
+      `${req.body.playerName || req.body.name} — ولي الأمر: ${req.body.guardianName || req.body.parentName}`
+    );
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 app.patch("/api/registrations/:id/status", requireAuth, async (req, res) => {
   try {
-    const r = await Registration.findOneAndUpdate({ id: req.params.id }, { status: req.body.status }, { new: true });
+    const update = { status: req.body.status };
+    if (req.body.adminNote !== undefined) update.adminNote = req.body.adminNote;
+    const r = await Registration.findOneAndUpdate({ id: req.params.id }, update, { new: true });
+    if (!r) return res.status(404).json({ error: "غير موجود" });
+    res.json(r);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+app.patch("/api/registrations/:id", requireAuth, async (req, res) => {
+  try {
+    const r = await Registration.findOneAndUpdate({ id: req.params.id }, req.body, { new: true });
     if (!r) return res.status(404).json({ error: "غير موجود" });
     res.json(r);
   } catch (err) { res.status(500).json({ error: err.message }); }
@@ -367,10 +452,15 @@ app.get("/api/admin-accounts", requireAuth, requireSuperAdmin, async (req, res) 
 });
 app.post("/api/admin-accounts", requireAuth, requireSuperAdmin, async (req, res) => {
   try {
-    const { username, password, isSuperAdmin, permissions } = req.body;
+    const { username, password, isSuperAdmin, permissions, role } = req.body;
     if (await Admin.findOne({ username })) return res.status(400).json({ error: "المستخدم موجود" });
     const passwordHash = await hashPassword(password);
-    const admin = await Admin.create({ id: Date.now().toString(), username, passwordHash, isSuperAdmin: isSuperAdmin || false, permissions: permissions || [] });
+    const admin = await Admin.create({
+      id: Date.now().toString(), username, passwordHash,
+      isSuperAdmin: isSuperAdmin || false,
+      permissions: permissions || [],
+      role: role || ""
+    });
     const obj = admin.toObject(); delete obj.passwordHash; res.json(obj);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -418,6 +508,5 @@ if (fs.existsSync(publicDir)) {
 /* ========================= START ========================= */
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, "0.0.0.0", () => {
-  console.log("🚀 Server running on port", PORT);
-  console.log("📦 MONGODB_URI:", MONGO_URI ? "SET ✅" : "NOT SET ❌");
+  console.log("Server running on port", PORT);
 });
