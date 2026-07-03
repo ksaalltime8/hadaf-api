@@ -40,7 +40,7 @@ const AdminSchema = new mongoose.Schema({
   id: String, username: { type: String, unique: true }, passwordHash: String,
   isSuperAdmin: { type: Boolean, default: false }, permissions: { type: [String], default: [] },
   role: { type: String, default: "" }, pushTokens: { type: [String], default: [] }
-});
+}, { timestamps: true });
 const Admin = mongoose.model("Admin", AdminSchema);
 
 const PlayerSchema = new mongoose.Schema({
