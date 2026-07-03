@@ -405,26 +405,38 @@ app.get("/api/dashboard/finance-summary", requireAuth, async (req, res) => {
 
 
 /* ========================= REGISTRATIONS ========================= */
-const RegistrationSchema_normalize = (r) => {
-  const obj = r.toObject ? r.toObject() : r;
-  if (!obj.playerName) obj.playerName = obj.name || "";
-  if (!obj.guardianName) obj.guardianName = obj.parentName || "";
-  if (!obj.guardianPhone) obj.guardianPhone = obj.parentPhone || obj.phone || "";
-  if (!obj.playerAge) obj.playerAge = obj.age || null;
-  if (!obj.playerPosition) obj.playerPosition = obj.position || null;
-  return obj;
-};
+function normalizeReg(r) {
+  try {
+    const obj = (r && r.toObject) ? r.toObject() : Object.assign({}, r);
+    // normalize old field names
+    if (!obj.playerName)   obj.playerName   = obj.name        || "";
+    if (!obj.guardianName) obj.guardianName = obj.parentName  || "";
+    if (!obj.guardianPhone)obj.guardianPhone= obj.parentPhone || obj.phone || "";
+    if (!obj.playerAge)    obj.playerAge    = obj.age         || null;
+    if (!obj.playerPosition)obj.playerPosition = obj.position || null;
+    // fix dates — old docs may have submittedAt instead of createdAt
+    if (!obj.createdAt && obj.submittedAt) obj.createdAt = obj.submittedAt;
+    if (obj.createdAt) {
+      const d = new Date(obj.createdAt);
+      if (isNaN(d.getTime())) obj.createdAt = new Date().toISOString();
+      else obj.createdAt = d.toISOString();
+    } else {
+      obj.createdAt = new Date().toISOString();
+    }
+    return obj;
+  } catch (e) { return r; }
+}
 
 app.get("/api/registrations", requireAuth, async (req, res) => {
   try {
-    const regs = await Registration.find({}).sort({ createdAt: -1 });
-    res.json(regs.map(RegistrationSchema_normalize));
+    const regs = await Registration.find({}).sort({ createdAt: -1 }).lean();
+    res.json(regs.map(normalizeReg));
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 app.post("/api/registrations", async (req, res) => {
   try {
     const reg = await Registration.create({ ...req.body, id: Date.now().toString() });
-    res.status(201).json(RegistrationSchema_normalize(reg));
+    res.status(201).json(normalizeReg(reg));
     sendPushToAllAdmins(
       "طلب تسجيل جديد 📋",
       `${req.body.playerName || req.body.name} — ولي الأمر: ${req.body.guardianName || req.body.parentName}`
@@ -437,28 +449,27 @@ app.patch("/api/registrations/:id/status", requireAuth, async (req, res) => {
     if (req.body.adminNote !== undefined) update.adminNote = req.body.adminNote;
     const r = await Registration.findOneAndUpdate({ id: req.params.id }, update, { new: true });
     if (!r) return res.status(404).json({ error: "غير موجود" });
-    res.json(RegistrationSchema_normalize(r));
+    res.json(normalizeReg(r));
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 app.patch("/api/registrations/:id", requireAuth, async (req, res) => {
   try {
     const r = await Registration.findOneAndUpdate({ id: req.params.id }, req.body, { new: true });
     if (!r) return res.status(404).json({ error: "غير موجود" });
-    res.json(RegistrationSchema_normalize(r));
+    res.json(normalizeReg(r));
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 app.put("/api/registrations/:id", requireAuth, async (req, res) => {
   try {
     const r = await Registration.findOneAndUpdate({ id: req.params.id }, req.body, { new: true });
     if (!r) return res.status(404).json({ error: "غير موجود" });
-    res.json(RegistrationSchema_normalize(r));
+    res.json(normalizeReg(r));
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 app.delete("/api/registrations/:id", requireAuth, async (req, res) => {
   try { await Registration.findOneAndDelete({ id: req.params.id }); res.json({ ok: true }); }
   catch (err) { res.status(500).json({ error: err.message }); }
 });
-
 /* ========================= ADMIN ACCOUNTS ========================= */
 app.get("/api/admin-accounts", requireAuth, requireSuperAdmin, async (req, res) => {
   try { res.json(await Admin.find({}, { passwordHash: 0 })); }
