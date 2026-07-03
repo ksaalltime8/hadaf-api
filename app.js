@@ -13,55 +13,33 @@ const { promisify } = require("util");
 const scryptAsync = promisify(crypto.scrypt);
 const app = express();
 
-/* ========================= MIDDLEWARE ========================= */
 app.set("trust proxy", 1);
 app.use(cors({ origin: true, credentials: true }));
-app.use(express.json({ limit: "5mb" }));
-app.use(express.urlencoded({ extended: true, limit: "5mb" }));
+app.use(express.json({ limit: "10mb" }));
+app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 
-/* ========================= MONGODB ========================= */
+/* ===== MONGODB ===== */
 const MONGO_URI = process.env.MONGODB_URI || process.env.MONGO_URL;
-console.log("MongoDB URI set:", MONGO_URI ? "YES" : "NO");
-if (!MONGO_URI) {
-  console.error("MONGODB_URI is not set!");
-  process.exit(1);
-}
+if (!MONGO_URI) { console.error("MONGODB_URI not set"); process.exit(1); }
 
-mongoose.connect(MONGO_URI, {
-  serverSelectionTimeoutMS: 15000,
-  socketTimeoutMS: 45000,
-  family: 4,
-})
-  .then(() => { console.log("MongoDB Connected"); seedAdmin(); })
-  .catch(err => { console.error("MongoDB Error:", err.message); process.exit(1); });
+mongoose.connect(MONGO_URI, { serverSelectionTimeoutMS: 15000, socketTimeoutMS: 45000, family: 4 })
+  .then(() => { console.log("MongoDB connected"); seedAdmin(); })
+  .catch(err => { console.error("MongoDB error:", err.message); process.exit(1); });
 
-/* ========================= SESSION (MongoDB store) ========================= */
+/* ===== SESSION ===== */
 app.use(session({
   secret: process.env.SESSION_SECRET || "hadaf-secret-2024",
   resave: false,
   saveUninitialized: false,
-  store: MongoStore.create({
-    mongoUrl: MONGO_URI,
-    ttl: 7 * 24 * 60 * 60,
-    autoRemove: "native"
-  }),
-  cookie: {
-    secure: true,
-    httpOnly: true,
-    sameSite: "none",
-    maxAge: 7 * 24 * 60 * 60 * 1000
-  }
+  store: MongoStore.create({ mongoUrl: MONGO_URI, ttl: 7 * 24 * 60 * 60, autoRemove: "native" }),
+  cookie: { secure: true, httpOnly: true, sameSite: "none", maxAge: 7 * 24 * 60 * 60 * 1000 }
 }));
 
-/* ========================= MODELS ========================= */
+/* ===== MODELS ===== */
 const AdminSchema = new mongoose.Schema({
-  id: String,
-  username: { type: String, unique: true },
-  passwordHash: String,
-  isSuperAdmin: { type: Boolean, default: false },
-  permissions: { type: [String], default: [] },
-  role: { type: String, default: "" },
-  pushTokens: { type: [String], default: [] }
+  id: String, username: { type: String, unique: true }, passwordHash: String,
+  isSuperAdmin: { type: Boolean, default: false }, permissions: { type: [String], default: [] },
+  role: { type: String, default: "" }, pushTokens: { type: [String], default: [] }
 });
 const Admin = mongoose.model("Admin", AdminSchema);
 
@@ -106,8 +84,9 @@ const RegistrationSchema = new mongoose.Schema({
   name: String, age: Number, position: String,
   parentName: String, parentPhone: String, phone: String,
   status: { type: String, default: "pending" },
-  adminNote: String, notes: String
+  adminNote: String, notes: String, submittedAt: Date
 }, { timestamps: true });
+const Registration = mongoose.model("Registration", RegistrationSchema);
 
 const SettingsSchema = new mongoose.Schema({
   academyName: { type: String, default: "أكاديمية هدف يونايتد" },
@@ -117,72 +96,89 @@ const SettingsSchema = new mongoose.Schema({
 });
 const Settings = mongoose.model("Settings", SettingsSchema);
 
-/* ========================= PASSWORD ========================= */
-async function hashPassword(password) {
+/* ===== HELPERS ===== */
+async function hashPassword(p) {
   const salt = crypto.randomBytes(16).toString("hex");
-  const buf = await scryptAsync(password, salt, 64);
+  const buf = await scryptAsync(p, salt, 64);
   return `${buf.toString("hex")}.${salt}`;
 }
-async function verifyPassword(password, stored) {
+async function verifyPassword(p, stored) {
   try {
     const [hash, salt] = stored.split(".");
     if (!hash || !salt) return false;
-    const buf = await scryptAsync(password, salt, 64);
+    const buf = await scryptAsync(p, salt, 64);
     return crypto.timingSafeEqual(Buffer.from(hash, "hex"), buf);
   } catch { return false; }
 }
 
-/* ========================= SEED ADMIN ========================= */
+function safeDate(val) {
+  if (!val) return new Date().toISOString();
+  const d = new Date(val);
+  return isNaN(d.getTime()) ? new Date().toISOString() : d.toISOString();
+}
+
+function normalizeReg(r) {
+  const obj = r && r.toObject ? r.toObject() : Object.assign({}, r);
+  if (!obj.playerName)    obj.playerName    = obj.name        || "";
+  if (!obj.guardianName)  obj.guardianName  = obj.parentName  || "";
+  if (!obj.guardianPhone) obj.guardianPhone = obj.parentPhone || obj.phone || "";
+  if (!obj.playerAge)     obj.playerAge     = obj.age         || null;
+  if (!obj.playerPosition)obj.playerPosition= obj.position    || null;
+  obj.createdAt = safeDate(obj.createdAt || obj.submittedAt);
+  obj.updatedAt = safeDate(obj.updatedAt);
+  return obj;
+}
+
+/* ===== SEED ADMIN ===== */
 async function seedAdmin() {
   try {
     const username = process.env.ADMIN_USERNAME || "k27";
     const password = process.env.ADMIN_PASSWORD || "q1w2e3r4t5";
+    const passwordHash = await hashPassword(password);
     const existing = await Admin.findOne({ username });
     if (!existing) {
-      const passwordHash = await hashPassword(password);
       await Admin.create({ id: "1", username, passwordHash, isSuperAdmin: true });
       console.log("Admin created:", username);
-    } else if (!existing.isSuperAdmin) {
-      await Admin.findOneAndUpdate({ username }, { $set: { isSuperAdmin: true } });
+    } else {
+      await Admin.findOneAndUpdate({ username }, { $set: { passwordHash, isSuperAdmin: true } });
+      console.log("Admin password refreshed");
     }
-  } catch (err) { console.error("Seed admin error:", err.message); }
+  } catch (err) { console.error("seedAdmin error:", err.message); }
 }
 
-/* ========================= AUTH MIDDLEWARE ========================= */
+/* ===== AUTH MIDDLEWARE ===== */
 function requireAuth(req, res, next) {
-  if (!req.session || !req.session.username)
-    return res.status(401).json({ ok: false, error: "غير مصرح" });
+  if (!req.session?.username) return res.status(401).json({ ok: false, error: "غير مصرح" });
   next();
 }
 function requireSuperAdmin(req, res, next) {
-  if (!req.session || !req.session.isSuperAdmin)
-    return res.status(403).json({ ok: false, error: "ممنوع" });
+  if (!req.session?.isSuperAdmin) return res.status(403).json({ ok: false, error: "ممنوع" });
   next();
 }
 
-/* ========================= HEALTH ========================= */
+/* ===== HEALTH ===== */
 app.get("/api/health", (req, res) => {
-  const states = { 0: "disconnected", 1: "connected", 2: "connecting", 3: "disconnecting" };
-  res.json({ ok: true, db: states[mongoose.connection.readyState] || "unknown", time: new Date().toISOString() });
+  const s = { 0: "disconnected", 1: "connected", 2: "connecting", 3: "disconnecting" };
+  res.json({ ok: true, db: s[mongoose.connection.readyState] || "unknown", time: new Date().toISOString() });
 });
 
-/* ========================= PUSH NOTIFICATIONS ========================= */
+/* ===== PUSH NOTIFICATIONS ===== */
 function httpPost(url, data) {
-  return new Promise((resolve) => {
+  return new Promise(resolve => {
     try {
       const body = JSON.stringify(data);
       const u = new URL(url);
-      const req = https.request({
-        hostname: u.hostname, path: u.pathname, method: "POST",
-        headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) }
-      }, res => { res.resume(); resolve(res.statusCode); });
+      const req = https.request(
+        { hostname: u.hostname, path: u.pathname, method: "POST",
+          headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) } },
+        res => { res.resume(); resolve(res.statusCode); }
+      );
       req.on("error", () => resolve(0));
-      req.write(body);
-      req.end();
-    } catch (e) { resolve(0); }
+      req.write(body); req.end();
+    } catch { resolve(0); }
   });
 }
-async function sendPushToAllAdmins(title, body) {
+async function sendPush(title, body) {
   try {
     const admins = await Admin.find({ pushTokens: { $exists: true, $not: { $size: 0 } } });
     const tokens = admins.flatMap(a => a.pushTokens || [])
@@ -195,70 +191,46 @@ async function sendPushToAllAdmins(title, body) {
   } catch (err) { console.error("Push error:", err.message); }
 }
 
-/* ========================= AUTH ========================= */
+/* ===== AUTH ROUTES ===== */
 app.post("/api/auth/login", async (req, res) => {
   try {
     const { username, password } = req.body;
     if (!username || !password) return res.status(400).json({ ok: false, error: "بيانات ناقصة" });
-    if (mongoose.connection.readyState !== 1)
-      return res.status(503).json({ ok: false, error: "قاعدة البيانات غير متصلة" });
+    if (mongoose.connection.readyState !== 1) return res.status(503).json({ ok: false, error: "قاعدة البيانات غير متصلة" });
     const admin = await Admin.findOne({ username });
     if (!admin) return res.status(401).json({ ok: false, error: "بيانات خاطئة" });
-    const valid = await verifyPassword(password, admin.passwordHash);
-    if (!valid) return res.status(401).json({ ok: false, error: "بيانات خاطئة" });
+    if (!await verifyPassword(password, admin.passwordHash)) return res.status(401).json({ ok: false, error: "بيانات خاطئة" });
     req.session.username = admin.username;
     req.session.isSuperAdmin = admin.isSuperAdmin;
     req.session.permissions = admin.permissions;
     req.session.role = admin.role || "";
-    req.session.save(() => res.json({
-      ok: true, username: admin.username,
-      isSuperAdmin: admin.isSuperAdmin,
-      permissions: admin.permissions,
-      role: admin.role || ""
-    }));
-  } catch (err) {
-    console.error("Login error:", err.message);
-    res.status(500).json({ ok: false, error: "خطأ في الخادم" });
-  }
+    req.session.save(() => res.json({ ok: true, username: admin.username, isSuperAdmin: admin.isSuperAdmin, permissions: admin.permissions, role: admin.role || "" }));
+  } catch (err) { console.error("Login error:", err.message); res.status(500).json({ ok: false, error: "خطأ في الخادم" }); }
 });
 
-app.post("/api/auth/logout", (req, res) => {
-  req.session.destroy(() => res.json({ ok: true }));
+app.post("/api/auth/logout", (req, res) => req.session.destroy(() => res.json({ ok: true })));
+
+app.get("/api/auth/me", (req, res) => {
+  if (!req.session?.username) return res.status(401).json({ authenticated: false });
+  res.json({ authenticated: true, username: req.session.username, isSuperAdmin: req.session.isSuperAdmin || false, permissions: req.session.permissions || [], role: req.session.role || "" });
 });
 
 app.post("/api/auth/push-token", requireAuth, async (req, res) => {
   try {
     const { token, remove } = req.body;
     if (!token) return res.status(400).json({ ok: false });
-    if (remove) {
-      await Admin.findOneAndUpdate({ username: req.session.username }, { $pull: { pushTokens: token } });
-    } else {
-      await Admin.findOneAndUpdate({ username: req.session.username }, { $addToSet: { pushTokens: token } });
-    }
+    const op = remove ? { $pull: { pushTokens: token } } : { $addToSet: { pushTokens: token } };
+    await Admin.findOneAndUpdate({ username: req.session.username }, op);
     res.json({ ok: true });
   } catch (err) { res.status(500).json({ ok: false }); }
 });
 
-app.get("/api/auth/me", (req, res) => {
-  if (!req.session || !req.session.username)
-    return res.status(401).json({ authenticated: false });
-  res.json({
-    authenticated: true,
-    username: req.session.username,
-    isSuperAdmin: req.session.isSuperAdmin || false,
-    permissions: req.session.permissions || [],
-    role: req.session.role || ""
-  });
-});
-
-/* ========================= PLAYERS ========================= */
+/* ===== PLAYERS ===== */
 app.get("/api/players", requireAuth, async (req, res) => {
-  try { res.json(await Player.find({}).sort({ createdAt: -1 })); }
-  catch (err) { res.status(500).json({ error: err.message }); }
+  try { res.json(await Player.find({}).sort({ createdAt: -1 })); } catch (err) { res.status(500).json({ error: err.message }); }
 });
 app.post("/api/players", requireAuth, async (req, res) => {
-  try { res.json(await Player.create({ ...req.body, id: Date.now().toString() })); }
-  catch (err) { res.status(500).json({ error: err.message }); }
+  try { res.json(await Player.create({ ...req.body, id: Date.now().toString() })); } catch (err) { res.status(500).json({ error: err.message }); }
 });
 app.put("/api/players/:id", requireAuth, async (req, res) => {
   try {
@@ -268,18 +240,15 @@ app.put("/api/players/:id", requireAuth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 app.delete("/api/players/:id", requireAuth, async (req, res) => {
-  try { await Player.findOneAndDelete({ id: req.params.id }); res.json({ ok: true }); }
-  catch (err) { res.status(500).json({ error: err.message }); }
+  try { await Player.findOneAndDelete({ id: req.params.id }); res.json({ ok: true }); } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-/* ========================= EMPLOYEES ========================= */
+/* ===== EMPLOYEES ===== */
 app.get("/api/employees", requireAuth, async (req, res) => {
-  try { res.json(await Employee.find({}).sort({ createdAt: -1 })); }
-  catch (err) { res.status(500).json({ error: err.message }); }
+  try { res.json(await Employee.find({}).sort({ createdAt: -1 })); } catch (err) { res.status(500).json({ error: err.message }); }
 });
 app.post("/api/employees", requireAuth, async (req, res) => {
-  try { res.json(await Employee.create({ ...req.body, id: Date.now().toString() })); }
-  catch (err) { res.status(500).json({ error: err.message }); }
+  try { res.json(await Employee.create({ ...req.body, id: Date.now().toString() })); } catch (err) { res.status(500).json({ error: err.message }); }
 });
 app.put("/api/employees/:id", requireAuth, async (req, res) => {
   try {
@@ -289,11 +258,10 @@ app.put("/api/employees/:id", requireAuth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 app.delete("/api/employees/:id", requireAuth, async (req, res) => {
-  try { await Employee.findOneAndDelete({ id: req.params.id }); res.json({ ok: true }); }
-  catch (err) { res.status(500).json({ error: err.message }); }
+  try { await Employee.findOneAndDelete({ id: req.params.id }); res.json({ ok: true }); } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-/* ========================= SUBSCRIPTIONS ========================= */
+/* ===== SUBSCRIPTIONS ===== */
 app.get("/api/subscriptions/expiring-soon", requireAuth, async (req, res) => {
   try {
     const today = new Date().toISOString().split("T")[0];
@@ -302,12 +270,10 @@ app.get("/api/subscriptions/expiring-soon", requireAuth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 app.get("/api/subscriptions", requireAuth, async (req, res) => {
-  try { res.json(await Subscription.find({}).sort({ createdAt: -1 })); }
-  catch (err) { res.status(500).json({ error: err.message }); }
+  try { res.json(await Subscription.find({}).sort({ createdAt: -1 })); } catch (err) { res.status(500).json({ error: err.message }); }
 });
 app.post("/api/subscriptions", requireAuth, async (req, res) => {
-  try { res.json(await Subscription.create({ ...req.body, id: Date.now().toString() })); }
-  catch (err) { res.status(500).json({ error: err.message }); }
+  try { res.json(await Subscription.create({ ...req.body, id: Date.now().toString() })); } catch (err) { res.status(500).json({ error: err.message }); }
 });
 app.put("/api/subscriptions/:id", requireAuth, async (req, res) => {
   try {
@@ -317,18 +283,15 @@ app.put("/api/subscriptions/:id", requireAuth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 app.delete("/api/subscriptions/:id", requireAuth, async (req, res) => {
-  try { await Subscription.findOneAndDelete({ id: req.params.id }); res.json({ ok: true }); }
-  catch (err) { res.status(500).json({ error: err.message }); }
+  try { await Subscription.findOneAndDelete({ id: req.params.id }); res.json({ ok: true }); } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-/* ========================= EXPENSES ========================= */
+/* ===== EXPENSES ===== */
 app.get("/api/expenses", requireAuth, async (req, res) => {
-  try { res.json(await Expense.find({}).sort({ createdAt: -1 })); }
-  catch (err) { res.status(500).json({ error: err.message }); }
+  try { res.json(await Expense.find({}).sort({ createdAt: -1 })); } catch (err) { res.status(500).json({ error: err.message }); }
 });
 app.post("/api/expenses", requireAuth, async (req, res) => {
-  try { res.json(await Expense.create({ ...req.body, id: Date.now().toString() })); }
-  catch (err) { res.status(500).json({ error: err.message }); }
+  try { res.json(await Expense.create({ ...req.body, id: Date.now().toString() })); } catch (err) { res.status(500).json({ error: err.message }); }
 });
 app.put("/api/expenses/:id", requireAuth, async (req, res) => {
   try {
@@ -338,18 +301,15 @@ app.put("/api/expenses/:id", requireAuth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 app.delete("/api/expenses/:id", requireAuth, async (req, res) => {
-  try { await Expense.findOneAndDelete({ id: req.params.id }); res.json({ ok: true }); }
-  catch (err) { res.status(500).json({ error: err.message }); }
+  try { await Expense.findOneAndDelete({ id: req.params.id }); res.json({ ok: true }); } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-/* ========================= SALARIES ========================= */
+/* ===== SALARIES ===== */
 app.get("/api/salaries", requireAuth, async (req, res) => {
-  try { res.json(await Salary.find({}).sort({ year: -1, month: -1 })); }
-  catch (err) { res.status(500).json({ error: err.message }); }
+  try { res.json(await Salary.find({}).sort({ year: -1, month: -1 })); } catch (err) { res.status(500).json({ error: err.message }); }
 });
 app.post("/api/salaries", requireAuth, async (req, res) => {
-  try { res.json(await Salary.create({ ...req.body, id: Date.now().toString(), paidAt: new Date() })); }
-  catch (err) { res.status(500).json({ error: err.message }); }
+  try { res.json(await Salary.create({ ...req.body, id: Date.now().toString(), paidAt: new Date() })); } catch (err) { res.status(500).json({ error: err.message }); }
 });
 app.put("/api/salaries/:id", requireAuth, async (req, res) => {
   try {
@@ -359,11 +319,10 @@ app.put("/api/salaries/:id", requireAuth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 app.delete("/api/salaries/:id", requireAuth, async (req, res) => {
-  try { await Salary.findOneAndDelete({ id: req.params.id }); res.json({ ok: true }); }
-  catch (err) { res.status(500).json({ error: err.message }); }
+  try { await Salary.findOneAndDelete({ id: req.params.id }); res.json({ ok: true }); } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-/* ========================= DASHBOARD ========================= */
+/* ===== DASHBOARD ===== */
 app.get("/api/dashboard/summary", requireAuth, async (req, res) => {
   try {
     const today = new Date().toISOString().split("T")[0];
@@ -385,7 +344,7 @@ app.get("/api/dashboard/finance-summary", requireAuth, async (req, res) => {
     const month = now.getMonth() + 1;
     const year = now.getFullYear();
     const start = new Date(year, month - 1, 1).toISOString().split("T")[0];
-    const end = new Date(year, month, 0).toISOString().split("T")[0];
+    const end   = new Date(year, month, 0).toISOString().split("T")[0];
     const [expenses, salaries, subs] = await Promise.all([
       Expense.find({ date: { $gte: start, $lte: end } }),
       Salary.find({ month, year }),
@@ -393,40 +352,12 @@ app.get("/api/dashboard/finance-summary", requireAuth, async (req, res) => {
     ]);
     const totalExpenses = expenses.reduce((s, e) => s + (e.amount || 0), 0);
     const totalSalaries = salaries.reduce((s, e) => s + (e.amount || 0), 0);
-    const totalIncome = subs.reduce((s, e) => s + (e.amount || 0), 0);
-    res.json({
-      totalIncome,
-      totalExpenses: totalExpenses + totalSalaries,
-      netProfit: totalIncome - totalExpenses - totalSalaries,
-      month, year
-    });
+    const totalIncome   = subs.reduce((s, e) => s + (e.amount || 0), 0);
+    res.json({ totalIncome, totalExpenses: totalExpenses + totalSalaries, netProfit: totalIncome - totalExpenses - totalSalaries, month, year });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-
-/* ========================= REGISTRATIONS ========================= */
-function normalizeReg(r) {
-  try {
-    const obj = (r && r.toObject) ? r.toObject() : Object.assign({}, r);
-    // normalize old field names
-    if (!obj.playerName)   obj.playerName   = obj.name        || "";
-    if (!obj.guardianName) obj.guardianName = obj.parentName  || "";
-    if (!obj.guardianPhone)obj.guardianPhone= obj.parentPhone || obj.phone || "";
-    if (!obj.playerAge)    obj.playerAge    = obj.age         || null;
-    if (!obj.playerPosition)obj.playerPosition = obj.position || null;
-    // fix dates — old docs may have submittedAt instead of createdAt
-    if (!obj.createdAt && obj.submittedAt) obj.createdAt = obj.submittedAt;
-    if (obj.createdAt) {
-      const d = new Date(obj.createdAt);
-      if (isNaN(d.getTime())) obj.createdAt = new Date().toISOString();
-      else obj.createdAt = d.toISOString();
-    } else {
-      obj.createdAt = new Date().toISOString();
-    }
-    return obj;
-  } catch (e) { return r; }
-}
-
+/* ===== REGISTRATIONS ===== */
 app.get("/api/registrations", requireAuth, async (req, res) => {
   try {
     const regs = await Registration.find({}).sort({ createdAt: -1 }).lean();
@@ -437,10 +368,7 @@ app.post("/api/registrations", async (req, res) => {
   try {
     const reg = await Registration.create({ ...req.body, id: Date.now().toString() });
     res.status(201).json(normalizeReg(reg));
-    sendPushToAllAdmins(
-      "طلب تسجيل جديد 📋",
-      `${req.body.playerName || req.body.name} — ولي الأمر: ${req.body.guardianName || req.body.parentName}`
-    );
+    sendPush("طلب تسجيل جديد 📋", `${req.body.playerName || req.body.name} — ولي الأمر: ${req.body.guardianName || req.body.parentName}`);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 app.patch("/api/registrations/:id/status", requireAuth, async (req, res) => {
@@ -467,25 +395,19 @@ app.put("/api/registrations/:id", requireAuth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 app.delete("/api/registrations/:id", requireAuth, async (req, res) => {
-  try { await Registration.findOneAndDelete({ id: req.params.id }); res.json({ ok: true }); }
-  catch (err) { res.status(500).json({ error: err.message }); }
+  try { await Registration.findOneAndDelete({ id: req.params.id }); res.json({ ok: true }); } catch (err) { res.status(500).json({ error: err.message }); }
 });
-/* ========================= ADMIN ACCOUNTS ========================= */
+
+/* ===== ADMIN ACCOUNTS ===== */
 app.get("/api/admin-accounts", requireAuth, requireSuperAdmin, async (req, res) => {
-  try { res.json(await Admin.find({}, { passwordHash: 0 })); }
-  catch (err) { res.status(500).json({ error: err.message }); }
+  try { res.json(await Admin.find({}, { passwordHash: 0 })); } catch (err) { res.status(500).json({ error: err.message }); }
 });
 app.post("/api/admin-accounts", requireAuth, requireSuperAdmin, async (req, res) => {
   try {
     const { username, password, isSuperAdmin, permissions, role } = req.body;
     if (await Admin.findOne({ username })) return res.status(400).json({ error: "المستخدم موجود" });
     const passwordHash = await hashPassword(password);
-    const admin = await Admin.create({
-      id: Date.now().toString(), username, passwordHash,
-      isSuperAdmin: isSuperAdmin || false,
-      permissions: permissions || [],
-      role: role || ""
-    });
+    const admin = await Admin.create({ id: Date.now().toString(), username, passwordHash, isSuperAdmin: isSuperAdmin || false, permissions: permissions || [], role: role || "" });
     const obj = admin.toObject(); delete obj.passwordHash; res.json(obj);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -499,39 +421,27 @@ app.put("/api/admin-accounts/:id", requireAuth, requireSuperAdmin, async (req, r
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 app.delete("/api/admin-accounts/:id", requireAuth, requireSuperAdmin, async (req, res) => {
-  try { await Admin.findOneAndDelete({ id: req.params.id }); res.json({ ok: true }); }
-  catch (err) { res.status(500).json({ error: err.message }); }
+  try { await Admin.findOneAndDelete({ id: req.params.id }); res.json({ ok: true }); } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-/* ========================= SETTINGS ========================= */
+/* ===== SETTINGS ===== */
 app.get("/api/settings", requireAuth, async (req, res) => {
-  try {
-    let s = await Settings.findOne();
-    if (!s) s = await Settings.create({});
-    res.json(s);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  try { let s = await Settings.findOne(); if (!s) s = await Settings.create({}); res.json(s); } catch (err) { res.status(500).json({ error: err.message }); }
 });
 app.put("/api/settings", requireAuth, requireSuperAdmin, async (req, res) => {
   try {
-    let s = await Settings.findOne();
-    if (!s) s = new Settings({});
-    Object.assign(s, req.body);
-    await s.save();
-    res.json(s);
+    let s = await Settings.findOne(); if (!s) s = new Settings({});
+    Object.assign(s, req.body); await s.save(); res.json(s);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-/* ========================= SERVE REACT ========================= */
+/* ===== SERVE REACT ===== */
 const publicDir = path.join(__dirname, "public");
 if (fs.existsSync(publicDir)) {
   app.use(express.static(publicDir));
-  app.get("*", (req, res) => {
-    res.sendFile(path.join(publicDir, "index.html"));
-  });
+  app.get("*", (req, res) => res.sendFile(path.join(publicDir, "index.html")));
 }
 
-/* ========================= START ========================= */
+/* ===== START ===== */
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, "0.0.0.0", () => {
-  console.log("Server running on port", PORT);
-});
+app.listen(PORT, "0.0.0.0", () => console.log("Server running on port", PORT));
