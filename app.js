@@ -103,10 +103,11 @@ const RegistrationSchema = new mongoose.Schema({
   playerName: String, playerAge: Number, playerPosition: String,
   playerPhoto: String, subscriptionDuration: String,
   guardianName: String, guardianPhone: String,
+  name: String, age: Number, position: String,
+  parentName: String, parentPhone: String, phone: String,
   status: { type: String, default: "pending" },
   adminNote: String, notes: String
 }, { timestamps: true });
-const Registration = mongoose.model("Registration", RegistrationSchema);
 
 const SettingsSchema = new mongoose.Schema({
   academyName: { type: String, default: "أكاديمية هدف يونايتد" },
@@ -402,15 +403,28 @@ app.get("/api/dashboard/finance-summary", requireAuth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+
 /* ========================= REGISTRATIONS ========================= */
+const RegistrationSchema_normalize = (r) => {
+  const obj = r.toObject ? r.toObject() : r;
+  if (!obj.playerName) obj.playerName = obj.name || "";
+  if (!obj.guardianName) obj.guardianName = obj.parentName || "";
+  if (!obj.guardianPhone) obj.guardianPhone = obj.parentPhone || obj.phone || "";
+  if (!obj.playerAge) obj.playerAge = obj.age || null;
+  if (!obj.playerPosition) obj.playerPosition = obj.position || null;
+  return obj;
+};
+
 app.get("/api/registrations", requireAuth, async (req, res) => {
-  try { res.json(await Registration.find({}).sort({ createdAt: -1 })); }
-  catch (err) { res.status(500).json({ error: err.message }); }
+  try {
+    const regs = await Registration.find({}).sort({ createdAt: -1 });
+    res.json(regs.map(RegistrationSchema_normalize));
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 app.post("/api/registrations", async (req, res) => {
   try {
     const reg = await Registration.create({ ...req.body, id: Date.now().toString() });
-    res.status(201).json(reg);
+    res.status(201).json(RegistrationSchema_normalize(reg));
     sendPushToAllAdmins(
       "طلب تسجيل جديد 📋",
       `${req.body.playerName || req.body.name} — ولي الأمر: ${req.body.guardianName || req.body.parentName}`
@@ -423,21 +437,21 @@ app.patch("/api/registrations/:id/status", requireAuth, async (req, res) => {
     if (req.body.adminNote !== undefined) update.adminNote = req.body.adminNote;
     const r = await Registration.findOneAndUpdate({ id: req.params.id }, update, { new: true });
     if (!r) return res.status(404).json({ error: "غير موجود" });
-    res.json(r);
+    res.json(RegistrationSchema_normalize(r));
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 app.patch("/api/registrations/:id", requireAuth, async (req, res) => {
   try {
     const r = await Registration.findOneAndUpdate({ id: req.params.id }, req.body, { new: true });
     if (!r) return res.status(404).json({ error: "غير موجود" });
-    res.json(r);
+    res.json(RegistrationSchema_normalize(r));
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 app.put("/api/registrations/:id", requireAuth, async (req, res) => {
   try {
     const r = await Registration.findOneAndUpdate({ id: req.params.id }, req.body, { new: true });
     if (!r) return res.status(404).json({ error: "غير موجود" });
-    res.json(r);
+    res.json(RegistrationSchema_normalize(r));
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 app.delete("/api/registrations/:id", requireAuth, async (req, res) => {
