@@ -45,7 +45,8 @@ const Admin = mongoose.model("Admin", AdminSchema);
 
 const PlayerSchema = new mongoose.Schema({
   id: String, name: String, phone: String, age: Number,
-  position: String, category: String, imageUrl: String, notes: String
+  position: String, category: String, imageUrl: String,
+  guardianName: String, guardianPhone: String, notes: String
 }, { timestamps: true });
 const Player = mongoose.model("Player", PlayerSchema);
 
@@ -58,7 +59,8 @@ const Employee = mongoose.model("Employee", EmployeeSchema);
 const SubscriptionSchema = new mongoose.Schema({
   id: String, playerId: String, playerName: String,
   startDate: String, endDate: String, amount: Number,
-  paid: { type: Boolean, default: false },
+  paid: { type: Boolean, default: false }, paidAt: Date,
+  status: String,
   guardianName: String, guardianPhone: String, notes: String
 }, { timestamps: true });
 const Subscription = mongoose.model("Subscription", SubscriptionSchema);
@@ -92,7 +94,8 @@ const SettingsSchema = new mongoose.Schema({
   academyName: { type: String, default: "أكاديمية هدف يونايتد" },
   phone: String, email: String, address: String, logo: String,
   currency: { type: String, default: "SAR" },
-  subscriptionDefaultDays: { type: Number, default: 30 }
+  subscriptionDefaultDays: { type: Number, default: 30 },
+  capital: String
 });
 const Settings = mongoose.model("Settings", SettingsSchema);
 
@@ -126,6 +129,17 @@ function normalizeReg(r) {
   if (!obj.playerPosition)obj.playerPosition= obj.position    || null;
   obj.createdAt = safeDate(obj.createdAt || obj.submittedAt);
   obj.updatedAt = safeDate(obj.updatedAt);
+  return obj;
+}
+
+function normalizeSubscription(r) {
+  const obj = r && r.toObject ? r.toObject() : Object.assign({}, r);
+  const today = new Date().toISOString().split("T")[0];
+  if (!obj.status) {
+    if (obj.paid) obj.status = "active";
+    else if (obj.endDate && obj.endDate < today) obj.status = "expired";
+    else obj.status = "pending";
+  }
   return obj;
 }
 
@@ -262,69 +276,45 @@ app.delete("/api/employees/:id", requireAuth, async (req, res) => {
 });
 
 /* ===== SUBSCRIPTIONS ===== */
-app.post("/api/subscriptions/:id/pay", requireAuth, async (req, res) => {
-  try {
-    const r = await Subscription.findOneAndUpdate(
-      { id: req.params.id },
-      { paid: true, paidAt: new Date() },
-      { new: true }
-    );
-    if (!r) return res.status(404).json({ error: "غير موجود" });
-    res.json(normalizeSubscription(r));
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
 app.get("/api/subscriptions/expiring-soon", requireAuth, async (req, res) => {
   try {
     const today = new Date().toISOString().split("T")[0];
     const future = new Date(Date.now() + 7 * 86400000).toISOString().split("T")[0];
-    res.json(await Subscription.find({ endDate: { $gte: today, $lte: future } }));
+    const subs = await Subscription.find({ endDate: { $gte: today, $lte: future } }).lean();
+    res.json(subs.map(normalizeSubscription));
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
-app.get("/api/subscriptions", requireAuth, async (req, res) => {
-  try { res.json(await Subscription.find({}).sort({ createdAt: -1 })); } catch (err) { res.status(500).json({ error: err.message }); }
-});
-app.post("/api/subscriptions", requireAuth, async (req, res) => {
-  try { res.json(await Subscription.create({ ...req.body, id: Date.now().toString() })); } catch (err) { res.status(500).json({ error: err.message }); }
-});
-app.put("/api/subscriptions/:id", requireAuth, async (req, res) => {
-  try {
-    const s = await Subscription.findOneAndUpdate({ id: req.params.id }, req.body, { new: true });
-    if (!s) return res.status(404).json({ error: "غير موجود" });
-    res.json(s);
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-app.delete("/api/subscriptions/:id", requireAuth, async (req, res) => {
-  try { await Subscription.findOneAndDelete({ id: req.params.id }); res.json({ ok: true }); } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-
-function normalizeSubscription(r) {
-  const obj = r && r.toObject ? r.toObject() : Object.assign({}, r);
-  // compute status from paid + endDate
-  if (!obj.status) {
-    const today = new Date().toISOString().split("T")[0];
-    if (obj.paid) obj.status = "active";
-    else if (obj.endDate && obj.endDate < today) obj.status = "expired";
-    else obj.status = "pending";
-  }
-  return obj;
-}
-
-app.get("/api/subscriptions/expiring-soon", requireAuth, async (req, res) => {
-  try {
-    const today = new Date().toISOString().split("T")[0];
-    const future = new Date(Date.now() + 7 * 86400000).toISOString().split("T")[0];
-    const regs = await Subscription.find({ endDate: { $gte: today, $lte: future } }).lean();
-    res.json(regs.map(normalizeSubscription));
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
 app.get("/api/subscriptions", requireAuth, async (req, res) => {
   try {
     const subs = await Subscription.find({}).sort({ createdAt: -1 }).lean();
     res.json(subs.map(normalizeSubscription));
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
+app.post("/api/subscriptions", requireAuth, async (req, res) => {
+  try { res.json(normalizeSubscription(await Subscription.create({ ...req.body, id: Date.now().toString() }))); } catch (err) { res.status(500).json({ error: err.message }); }
+});
+app.put("/api/subscriptions/:id", requireAuth, async (req, res) => {
+  try {
+    const s = await Subscription.findOneAndUpdate({ id: req.params.id }, req.body, { new: true });
+    if (!s) return res.status(404).json({ error: "غير موجود" });
+    res.json(normalizeSubscription(s));
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+app.post("/api/subscriptions/:id/pay", requireAuth, async (req, res) => {
+  try {
+    const s = await Subscription.findOneAndUpdate(
+      { id: req.params.id },
+      { paid: true, paidAt: new Date(), status: "active" },
+      { new: true }
+    );
+    if (!s) return res.status(404).json({ error: "غير موجود" });
+    res.json(normalizeSubscription(s));
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+app.delete("/api/subscriptions/:id", requireAuth, async (req, res) => {
+  try { await Subscription.findOneAndDelete({ id: req.params.id }); res.json({ ok: true }); } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 /* ===== EXPENSES ===== */
 app.get("/api/expenses", requireAuth, async (req, res) => {
   try { res.json(await Expense.find({}).sort({ createdAt: -1 })); } catch (err) { res.status(500).json({ error: err.message }); }
@@ -379,20 +369,16 @@ app.get("/api/dashboard/summary", requireAuth, async (req, res) => {
 
 app.get("/api/dashboard/finance-summary", requireAuth, async (req, res) => {
   try {
-    const now = new Date();
-    const month = now.getMonth() + 1;
-    const year = now.getFullYear();
-    const start = new Date(year, month - 1, 1).toISOString().split("T")[0];
-    const end   = new Date(year, month, 0).toISOString().split("T")[0];
-    const [expenses, salaries, subs] = await Promise.all([
-      Expense.find({ date: { $gte: start, $lte: end } }),
-      Salary.find({ month, year }),
-      Subscription.find({ paid: true, startDate: { $gte: start } })
+    const [expenses, salaries] = await Promise.all([
+      Expense.find({}).lean(),
+      Salary.find({ paid: true }).lean()
     ]);
-    const totalExpenses = expenses.reduce((s, e) => s + (e.amount || 0), 0);
-    const totalSalaries = salaries.reduce((s, e) => s + (e.amount || 0), 0);
-    const totalIncome   = subs.reduce((s, e) => s + (e.amount || 0), 0);
-    res.json({ totalIncome, totalExpenses: totalExpenses + totalSalaries, netProfit: totalIncome - totalExpenses - totalSalaries, month, year });
+    const totalRent      = expenses.filter(e => e.category === "rent")    .reduce((s, e) => s + (e.amount || 0), 0);
+    const totalPurchases = expenses.filter(e => e.category === "purchase").reduce((s, e) => s + (e.amount || 0), 0);
+    const totalDaily     = expenses.filter(e => e.category === "daily")   .reduce((s, e) => s + (e.amount || 0), 0);
+    const totalSalaries  = salaries.reduce((s, e) => s + (e.amount || 0), 0);
+    const grandTotal     = totalRent + totalPurchases + totalDaily + totalSalaries;
+    res.json({ totalRent, totalPurchases, totalDaily, totalSalaries, grandTotal });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -470,7 +456,12 @@ app.get("/api/settings", requireAuth, async (req, res) => {
 app.put("/api/settings", requireAuth, requireSuperAdmin, async (req, res) => {
   try {
     let s = await Settings.findOne(); if (!s) s = new Settings({});
-    Object.assign(s, req.body); await s.save(); res.json(s);
+    if (req.body.key && req.body.value !== undefined) {
+      s[req.body.key] = req.body.value;
+    } else {
+      Object.assign(s, req.body);
+    }
+    await s.save(); res.json(s);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
