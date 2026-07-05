@@ -275,7 +275,27 @@ app.delete("/api/employees/:id", requireAuth, async (req, res) => {
   try { await Employee.findOneAndDelete({ id: req.params.id }); res.json({ ok: true }); } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+
 /* ===== SUBSCRIPTIONS ===== */
+function subFilter(id) {
+  const filter = [{ id: id }];
+  if (/^[0-9a-fA-F]{24}$/.test(id)) filter.push({ _id: id });
+  return { $or: filter };
+}
+
+function normalizeSubscription(r) {
+  const obj = r && r.toObject ? r.toObject() : Object.assign({}, r);
+  // ensure custom id is always the _id string if not set
+  if (!obj.id) obj.id = obj._id ? obj._id.toString() : obj.id;
+  const today = new Date().toISOString().split("T")[0];
+  if (!obj.status) {
+    if (obj.paid) obj.status = "active";
+    else if (obj.endDate && obj.endDate < today) obj.status = "expired";
+    else obj.status = "pending";
+  }
+  return obj;
+}
+
 app.get("/api/subscriptions/expiring-soon", requireAuth, async (req, res) => {
   try {
     const today = new Date().toISOString().split("T")[0];
@@ -291,11 +311,14 @@ app.get("/api/subscriptions", requireAuth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 app.post("/api/subscriptions", requireAuth, async (req, res) => {
-  try { res.json(normalizeSubscription(await Subscription.create({ ...req.body, id: Date.now().toString() }))); } catch (err) { res.status(500).json({ error: err.message }); }
+  try {
+    const sub = await Subscription.create({ ...req.body, id: Date.now().toString() });
+    res.json(normalizeSubscription(sub));
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 app.put("/api/subscriptions/:id", requireAuth, async (req, res) => {
   try {
-    const s = await Subscription.findOneAndUpdate({ id: req.params.id }, req.body, { new: true });
+    const s = await Subscription.findOneAndUpdate(subFilter(req.params.id), req.body, { new: true });
     if (!s) return res.status(404).json({ error: "غير موجود" });
     res.json(normalizeSubscription(s));
   } catch (err) { res.status(500).json({ error: err.message }); }
@@ -303,7 +326,7 @@ app.put("/api/subscriptions/:id", requireAuth, async (req, res) => {
 app.post("/api/subscriptions/:id/pay", requireAuth, async (req, res) => {
   try {
     const s = await Subscription.findOneAndUpdate(
-      { id: req.params.id },
+      subFilter(req.params.id),
       { paid: true, paidAt: new Date(), status: "active" },
       { new: true }
     );
@@ -312,7 +335,10 @@ app.post("/api/subscriptions/:id/pay", requireAuth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 app.delete("/api/subscriptions/:id", requireAuth, async (req, res) => {
-  try { await Subscription.findOneAndDelete({ id: req.params.id }); res.json({ ok: true }); } catch (err) { res.status(500).json({ error: err.message }); }
+  try {
+    await Subscription.findOneAndDelete(subFilter(req.params.id));
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 /* ===== EXPENSES ===== */
