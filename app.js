@@ -262,6 +262,17 @@ app.delete("/api/employees/:id", requireAuth, async (req, res) => {
 });
 
 /* ===== SUBSCRIPTIONS ===== */
+app.post("/api/subscriptions/:id/pay", requireAuth, async (req, res) => {
+  try {
+    const r = await Subscription.findOneAndUpdate(
+      { id: req.params.id },
+      { paid: true, paidAt: new Date() },
+      { new: true }
+    );
+    if (!r) return res.status(404).json({ error: "غير موجود" });
+    res.json(normalizeSubscription(r));
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
 app.get("/api/subscriptions/expiring-soon", requireAuth, async (req, res) => {
   try {
     const today = new Date().toISOString().split("T")[0];
@@ -286,6 +297,34 @@ app.delete("/api/subscriptions/:id", requireAuth, async (req, res) => {
   try { await Subscription.findOneAndDelete({ id: req.params.id }); res.json({ ok: true }); } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+
+function normalizeSubscription(r) {
+  const obj = r && r.toObject ? r.toObject() : Object.assign({}, r);
+  // compute status from paid + endDate
+  if (!obj.status) {
+    const today = new Date().toISOString().split("T")[0];
+    if (obj.paid) obj.status = "active";
+    else if (obj.endDate && obj.endDate < today) obj.status = "expired";
+    else obj.status = "pending";
+  }
+  return obj;
+}
+
+app.get("/api/subscriptions/expiring-soon", requireAuth, async (req, res) => {
+  try {
+    const today = new Date().toISOString().split("T")[0];
+    const future = new Date(Date.now() + 7 * 86400000).toISOString().split("T")[0];
+    const regs = await Subscription.find({ endDate: { $gte: today, $lte: future } }).lean();
+    res.json(regs.map(normalizeSubscription));
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get("/api/subscriptions", requireAuth, async (req, res) => {
+  try {
+    const subs = await Subscription.find({}).sort({ createdAt: -1 }).lean();
+    res.json(subs.map(normalizeSubscription));
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
 /* ===== EXPENSES ===== */
 app.get("/api/expenses", requireAuth, async (req, res) => {
   try { res.json(await Expense.find({}).sort({ createdAt: -1 })); } catch (err) { res.status(500).json({ error: err.message }); }
